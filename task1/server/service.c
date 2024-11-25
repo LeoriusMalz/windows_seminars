@@ -4,58 +4,30 @@ extern SERVICE_STATUS g_hSvcStatus;
 extern SERVICE_STATUS_HANDLE g_hSvcStatusHandle;
 extern HANDLE g_hSvcStopEvent;
 
-VOID SvcInstall() {
-  SC_HANDLE schSCManager;
-  SC_HANDLE schService;
-  TCHAR szUnquotedPath[MAX_PATH];
-
-  // printf("Svc install begin\n");
-  if (!GetModuleFileName(NULL, szUnquotedPath, MAX_PATH)) {
-    printf("Cannot install service (%d)\n", GetLastError());
+VOID SvcRemove(void) {
+  SC_HANDLE hSCManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+  if(!hSCManager) {
+    printf("Error: Can't open Service Control Manager\n");
     return;
   }
 
-  TCHAR szPath[MAX_PATH];
-  StringCbPrintf(szPath, MAX_PATH, TEXT("\"%s\""), szUnquotedPath);
-
-  // Get a handle to the SCM database.
-  schSCManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-
-  if (NULL == schSCManager) {
-    printf("OpenSCManager failed (%d)\n", GetLastError());
+  SC_HANDLE hService = OpenService(hSCManager, SVCNAME, SERVICE_STOP | DELETE);
+  if(!hService) {
+    printf("Error: Can't remove service\n");
+    CloseServiceHandle(hSCManager);
     return;
   }
-
-  schService = CreateService(schSCManager,       // SCM database
-                             SVCNAME,            // name of service
-                             SVCNAME,            // service name to display
-                             SERVICE_ALL_ACCESS, // desired access
-                             SERVICE_WIN32_OWN_PROCESS, // service type
-                             SERVICE_DEMAND_START,      // start type
-                             SERVICE_ERROR_NORMAL,      // error control type
-                             szPath, // path to service's binary
-                             NULL,   // no load ordering group
-                             NULL,   // no tag identifier
-                             NULL,   // no dependencies
-                             NULL,   // LocalSystem account
-                             NULL);  // no password
-
-  if (schService == NULL) {
-    printf("CreateService failed (%d)\n", GetLastError());
-    CloseServiceHandle(schSCManager);
-    return;
-  } else
-    printf("Service installed successfully\n");
-
-  CloseServiceHandle(schService);
-  CloseServiceHandle(schSCManager);
+  
+  DeleteService(hService);
+  CloseServiceHandle(hService);
+  CloseServiceHandle(hSCManager);
+  printf("Service deleted successfully\n");
 }
 
 VOID ReportSvcStatus(DWORD dwCurrentState, DWORD dwWin32ExitCode,
                      DWORD dwWaitHint) {
   static DWORD dwCheckPoint = 1;
 
-  // Fill in the SERVICE_STATUS structure.
   g_hSvcStatus.dwCurrentState = dwCurrentState;
   g_hSvcStatus.dwWin32ExitCode = dwWin32ExitCode;
   g_hSvcStatus.dwWaitHint = dwWaitHint;
@@ -71,28 +43,56 @@ VOID ReportSvcStatus(DWORD dwCurrentState, DWORD dwWin32ExitCode,
   else
     g_hSvcStatus.dwCheckPoint = dwCheckPoint++;
 
-  // Report the status of the service to the SCM.
   SetServiceStatus(g_hSvcStatusHandle, &g_hSvcStatus);
 }
 
-VOID WINAPI SvcCtrlHandler(DWORD dwCtrl) {
-  // Handle the requested control code.
+VOID SvcCtrlHandler(DWORD dwCtrl) {
   switch (dwCtrl) {
   case SERVICE_CONTROL_STOP:
     ReportSvcStatus(SERVICE_STOP_PENDING, NO_ERROR, 0);
-
-    // Signal the service to stop.
     SetEvent(g_hSvcStopEvent);
     ReportSvcStatus(g_hSvcStatus.dwCurrentState, NO_ERROR, 0);
-
     return;
-
   case SERVICE_CONTROL_INTERROGATE:
     break;
-
   default:
     break;
   }
+}
+
+VOID SvcInstall() {
+  SC_HANDLE schSCManager;
+  SC_HANDLE schService;
+  TCHAR szUnquotedPath[MAX_PATH];
+
+  if (!GetModuleFileName(NULL, szUnquotedPath, MAX_PATH)) {
+    printf("Cannot install service (%d)\n", GetLastError());
+    return;
+  }
+
+  TCHAR szPath[MAX_PATH];
+  StringCbPrintf(szPath, MAX_PATH, TEXT("\"%s\""), szUnquotedPath);
+
+  schSCManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+
+  if (NULL == schSCManager) {
+    printf("OpenSCManager failed (%d)\n", GetLastError());
+    return;
+  }
+
+  schService = CreateService(schSCManager, SVCNAME, SVCNAME, SERVICE_ALL_ACCESS,
+                             SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+                             SERVICE_ERROR_NORMAL, szPath, NULL, NULL, NULL, NULL, NULL);
+
+  if (schService == NULL) {
+    printf("CreateService failed (%d)\n", GetLastError());
+    CloseServiceHandle(schSCManager);
+    return;
+  } else
+    printf("Service installed successfully\n");
+
+  CloseServiceHandle(schService);
+  CloseServiceHandle(schSCManager);
 }
 
 VOID SvcReportEvent(LPTSTR szFunction) {
@@ -103,45 +103,13 @@ VOID SvcReportEvent(LPTSTR szFunction) {
   hEventSource = RegisterEventSource(NULL, SVCNAME);
 
   if (NULL != hEventSource) {
-    StringCchPrintf(Buffer, 80, TEXT("%s failed with %d"), szFunction,
-                    GetLastError());
+    StringCchPrintf(Buffer, 80, TEXT("%s failed with %d"), szFunction, GetLastError());
 
     lpszStrings[0] = SVCNAME;
     lpszStrings[1] = Buffer;
 
-    ReportEvent(hEventSource,        // event log handle
-                EVENTLOG_ERROR_TYPE, // event type
-                0,                   // event category
-                SVC_ERROR,           // event identifier
-                NULL,                // no security identifier
-                2,                   // size of lpszStrings array
-                0,                   // no binary data
-                lpszStrings,         // array of strings
-                NULL);               // no binary data
+    ReportEvent(hEventSource, EVENTLOG_ERROR_TYPE, 0, SVC_ERROR, NULL, 2, 0, lpszStrings, NULL);
 
     DeregisterEventSource(hEventSource);
   }
-}
-
-VOID SvcRemove(void) {
-  SC_HANDLE hSCManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-  if(!hSCManager) {
-    printf("Error: Can't open Service Control Manager\n");
-    //  addLogMessage("Error: Can't open Service Control Manager");
-    return;
-  }
-
-  SC_HANDLE hService = OpenService(hSCManager, SVCNAME, SERVICE_STOP | DELETE);
-  if(!hService) {
-    printf("Error: Can't remove service\n");
-    //  addLogMessage("Error: Can't remove service");
-    CloseServiceHandle(hSCManager);
-    return;
-  }
-  
-  DeleteService(hService);
-  CloseServiceHandle(hService);
-  CloseServiceHandle(hSCManager);
-  // addLogMessage("Success remove service!");
-  printf("Service deleted successfully\n");
 }

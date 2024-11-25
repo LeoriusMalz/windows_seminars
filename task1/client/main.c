@@ -1,26 +1,27 @@
 #include "client.h"
 
-SOCKET ConnectSocket = INVALID_SOCKET;
+SOCKET ClientSocket = INVALID_SOCKET;
 
-DWORD main(DWORD argc, CHAR **argv) {
-  if (argc != 2) {
-    printf("usage: %s <server-address>\n", argv[0]);
-    exit(1);
-  }
+int main(int argc, CHAR **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <server-address>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
 
-  CreateSocket(argv[1]);
+    InitializeSocket(argv[1]);
 
-  HANDLE threads[2];
-  threads[0] = CreateThread(NULL, 0, WriteToPipe, NULL, 0, NULL);
-  threads[1] = CreateThread(NULL, 0, ReadFromPipe, NULL, 0, NULL);
+    HANDLE workerThreads[2];
+    workerThreads[0] = CreateThread(NULL, 0, HandleWriteThread, NULL, 0, NULL);
+    workerThreads[1] = CreateThread(NULL, 0, HandleReadThread, NULL, 0, NULL);
 
-  WaitForMultipleObjects(2, threads, TRUE, INFINITE);
+    WaitForMultipleObjects(2, workerThreads, TRUE, INFINITE);
 
-  for (int i = 0; i < 2; ++i)
-    CloseHandle(threads[i]);
+    for (int i = 0; i < 2; i++) {
+        CloseHandle(workerThreads[i]);
+    }
 
-  ShutdownConnection();
-  printf("Disconnected from server\n");
+    TerminateConnection();
+    printf("Disconnected successfully.\n");
 
-  return EOK;
+    return SUCCESS_CODE;
 }

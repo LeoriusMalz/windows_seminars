@@ -1,113 +1,99 @@
 #include "client.h"
 
-extern SOCKET ConnectSocket;
+extern SOCKET ClientSocket;
 
-void CreateSocket(const CHAR *argv) {
-  WSADATA wsaData;
+void InitializeSocket(const CHAR *serverAddress) {
+    WSADATA wsaData;
+    struct addrinfo *addressInfo = NULL, *current = NULL, settings;
+    DWORD initResult;
 
-  struct addrinfo *result = NULL, *ptr = NULL, hints;
-  DWORD iResult;
-
-  // Initialize Winsock
-  iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-  if (iResult != 0) {
-    printf("WSAStartup failed with error: %d\n", iResult);
-    exit(1);
-  }
-
-  ZeroMemory(&hints, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_protocol = IPPROTO_TCP;
-
-  // Resolve the server address and port
-  iResult = getaddrinfo(argv, DEFAULT_PORT, &hints, &result);
-  if (iResult != 0) {
-    printf("getaddrinfo failed with error: %d\n", iResult);
-    WSACleanup();
-    exit(1);
-  }
-
-  // Attempt to connect to an address until one succeeds
-  for (ptr = result; ptr != NULL; ptr = ptr->ai_next) {
-
-    // Create a SOCKET for connecting to server
-    ConnectSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
-    if (ConnectSocket == INVALID_SOCKET) {
-      printf("socket failed with error: %ld\n", WSAGetLastError());
-      WSACleanup();
-      exit(1);
+    // Инициализация Winsock
+    initResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (initResult != 0) {
+        fprintf(stderr, "WSAStartup error: %d\n", initResult);
+        exit(EXIT_FAILURE);
     }
 
-    // Connect to server.
-    iResult = connect(ConnectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
-    if (iResult == SOCKET_ERROR) {
-      closesocket(ConnectSocket);
-      ConnectSocket = INVALID_SOCKET;
-      continue;
+    ZeroMemory(&settings, sizeof(settings));
+    settings.ai_family = AF_UNSPEC;
+    settings.ai_socktype = SOCK_STREAM;
+    settings.ai_protocol = IPPROTO_TCP;
+
+    // Получение адреса сервера
+    initResult = getaddrinfo(serverAddress, PORT_NUMBER, &settings, &addressInfo);
+    if (initResult != 0) {
+        fprintf(stderr, "getaddrinfo error: %d\n", initResult);
+        WSACleanup();
+        exit(EXIT_FAILURE);
     }
-    break;
-  }
 
-  freeaddrinfo(result);
+    // Попытка подключиться
+    for (current = addressInfo; current != NULL; current = current->ai_next) {
+        ClientSocket = socket(current->ai_family, current->ai_socktype, current->ai_protocol);
+        if (ClientSocket == INVALID_SOCKET) {
+            fprintf(stderr, "Socket creation error: %ld\n", WSAGetLastError());
+            WSACleanup();
+            exit(EXIT_FAILURE);
+        }
 
-  if (ConnectSocket == INVALID_SOCKET) {
-    printf("Unable to connect to server!\n");
-    WSACleanup();
-    exit(1);
-  }
+        // Подключение к серверу
+        initResult = connect(ClientSocket, current->ai_addr, (int)current->ai_addrlen);
+        if (initResult == SOCKET_ERROR) {
+            closesocket(ClientSocket);
+            ClientSocket = INVALID_SOCKET;
+            continue;
+        }
+        break;
+    }
+
+    freeaddrinfo(addressInfo);
+
+    if (ClientSocket == INVALID_SOCKET) {
+        fprintf(stderr, "Connection failed!\n");
+        WSACleanup();
+        exit(EXIT_FAILURE);
+    }
 }
 
-void ShutdownConnection(void) {
-  DWORD iResult = shutdown(ConnectSocket, SD_SEND);
-  if (iResult == SOCKET_ERROR) {
-    printf("shutdown failed with error: %d\n", WSAGetLastError());
-    closesocket(ConnectSocket);
+void TerminateConnection(void) {
+    DWORD shutdownResult = shutdown(ClientSocket, SD_SEND);
+    if (shutdownResult == SOCKET_ERROR) {
+        fprintf(stderr, "Shutdown error: %d\n", WSAGetLastError());
+        closesocket(ClientSocket);
+        WSACleanup();
+        exit(EXIT_FAILURE);
+    }
+    closesocket(ClientSocket);
     WSACleanup();
-    exit(-1);
-  }
-  // cleanup
-  closesocket(ConnectSocket);
-  WSACleanup();
 }
 
-DWORD WINAPI WriteToPipe(LPDWORD dummy) {
-  UNREFERENCED_PARAMETER(dummy);
-  DWORD iResult, dwRead, bSuccess;
+DWORD WINAPI HandleWriteThread(LPDWORD unused) {
+    UNREFERENCED_PARAMETER(unused);
+    DWORD sendResult, bytesRead;
+    CHAR buffer[BUFFER_SIZE] = {0};
 
-  for (;;) {
-    CHAR chBuf[BUFSIZE] = "";
+    while (TRUE) {
+        BOOL readSuccess = ReadFile(GetStdHandle(STD_INPUT_HANDLE), buffer, BUFFER_SIZE, &bytesRead, NULL);
+        if (!readSuccess) return SUCCESS_CODE;
 
-    bSuccess =
-        ReadFile(GetStdHandle(STD_INPUT_HANDLE), chBuf, BUFSIZE, &dwRead, NULL);
-    if (!bSuccess) {
-      return EOK;
+        sendResult = send(ClientSocket, buffer, bytesRead, 0);
+        if (sendResult == SOCKET_ERROR) return ERROR_CODE;
     }
-
-    iResult = send(ConnectSocket, chBuf, dwRead, 0);
-    if (iResult == SOCKET_ERROR) {
-      return -1;
-    }
-  }
 }
 
-DWORD WINAPI ReadFromPipe(LPDWORD dummy) {
-  UNREFERENCED_PARAMETER(dummy);
-  DWORD iResult, dwRead, bSuccess;
+DWORD WINAPI HandleReadThread(LPDWORD unused) {
+    UNREFERENCED_PARAMETER(unused);
+    DWORD recvResult, bytesWritten;
+    CHAR buffer[BUFFER_SIZE + 1] = {0};
 
-  for (;;) {
-    CHAR chBuf[BUFSIZE + 1] = "";
-
-    iResult = recv(ConnectSocket, chBuf, BUFSIZE, 0);
-    if (iResult > 0) {
-      chBuf[strlen(chBuf)] = 0;
-      bSuccess = WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), chBuf,
-                           strlen(chBuf), &dwRead, NULL);
-      if (!bSuccess) {
-        return EOK;
-      }
-    } else {
-      return -1;
+    while (TRUE) {
+        recvResult = recv(ClientSocket, buffer, BUFFER_SIZE, 0);
+        if (recvResult > 0) {
+            buffer[recvResult] = '\0';
+            BOOL writeSuccess = WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buffer, strlen(buffer), &bytesWritten, NULL);
+            if (!writeSuccess) return SUCCESS_CODE;
+        } else {
+            return ERROR_CODE;
+        }
     }
-  }
 }

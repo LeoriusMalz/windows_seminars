@@ -1,234 +1,223 @@
 #include "server.h"
 
-extern HANDLE g_hChildStd_IN_Rd;
-extern HANDLE g_hChildStd_IN_Wr;
-extern HANDLE g_hChildStd_OUT_Rd;
-extern HANDLE g_hChildStd_OUT_Wr;
-extern SOCKET ClientSocket;
+extern HANDLE inputPipeRead;
+extern HANDLE inputPipeWrite;
+extern HANDLE outputPipeRead;
+extern HANDLE outputPipeWrite;
+extern SOCKET clientSock;
 
-void WorkWithClient(void) {
-  CreatePipes();
-  CreateSocket();
-  CreateChildProcess();
+void configureSocket(void) {
+    WSADATA wsData;
+    DWORD result, sendResult;
+    SOCKET listeningSocket = INVALID_SOCKET;
 
-  HANDLE threads[2];
-  threads[0] = CreateThread(NULL, 0, WriteToPipe, NULL, 0, NULL);
-  threads[1] = CreateThread(NULL, 0, ReadFromPipe, NULL, 0, NULL);
+    struct addrinfo *resolvedAddr = NULL;
+    struct addrinfo hints;
 
-  WaitForMultipleObjects(2, threads, TRUE, INFINITE);
-
-  for (int i = 0; i < 2; ++i)
-    CloseHandle(threads[i]);
-
-  CloseConnection();
-}
-
-void CreateSocket(void) {
-  WSADATA wsaData;
-  DWORD iResult, iSendResult;
-  SOCKET ListenSocket = INVALID_SOCKET;
-
-  struct addrinfo *result = NULL;
-  struct addrinfo hints;
-
-  // Initialize Winsock
-  iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-  if (iResult != 0) {
-    printf("WSAStartup failed with error: %d\n", iResult);
-    ErrorExit(TEXT("WSAStartup failed"));
-  }
-
-  ZeroMemory(&hints, sizeof(hints));
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_protocol = IPPROTO_TCP;
-  hints.ai_flags = AI_PASSIVE;
-
-  // Resolve the server address and port
-  iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
-  if (iResult != 0) {
-    printf("getaddrinfo failed with error: %d\n", iResult);
-    WSACleanup();
-    ErrorExit(TEXT("getaddrinfo failed"));
-  }
-
-  // Create a SOCKET for the server to listen for client connections.
-  ListenSocket =
-      socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-  if (ListenSocket == INVALID_SOCKET) {
-    printf("socket failed with error: %ld\n", WSAGetLastError());
-    freeaddrinfo(result);
-    WSACleanup();
-    ErrorExit(TEXT("socket failed"));
-  }
-
-  // Setup the TCP listening socket
-  iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
-  if (iResult == SOCKET_ERROR) {
-    printf("bind failed with error: %d\n", WSAGetLastError());
-    freeaddrinfo(result);
-    closesocket(ListenSocket);
-    WSACleanup();
-    ErrorExit(TEXT("bind failed"));
-  }
-
-  freeaddrinfo(result);
-
-  iResult = listen(ListenSocket, SOMAXCONN);
-  if (iResult == SOCKET_ERROR) {
-    printf("listen failed with error: %d\n", WSAGetLastError());
-    closesocket(ListenSocket);
-    WSACleanup();
-    ErrorExit(TEXT("listen failed"));
-  }
-
-  // Accept a client socket
-  ClientSocket = accept(ListenSocket, NULL, NULL);
-  if (ClientSocket == INVALID_SOCKET) {
-    printf("accept failed with error: %d\n", WSAGetLastError());
-    closesocket(ListenSocket);
-    WSACleanup();
-    ErrorExit(TEXT("accept failed"));
-  }
-
-  // No longer need server socket
-  closesocket(ListenSocket);
-}
-
-void CloseConnection(void) {
-  DWORD iResult = shutdown(ClientSocket, SD_SEND);
-  if (iResult == SOCKET_ERROR) {
-    printf("shutdown failed with error: %d\n", WSAGetLastError());
-    closesocket(ClientSocket);
-    WSACleanup();
-    ErrorExit(TEXT("Shutdown Failed"));
-  }
-  // cleanup
-  closesocket(ClientSocket);
-  WSACleanup();
-}
-
-void CreatePipes(void) {
-  SECURITY_ATTRIBUTES saAttr;
-
-  saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-  saAttr.bInheritHandle = TRUE;
-  saAttr.lpSecurityDescriptor = NULL;
-
-  if (!CreatePipe(&g_hChildStd_OUT_Rd, &g_hChildStd_OUT_Wr, &saAttr, 0))
-    ErrorExit(TEXT("StdoutRd CreatePipe"));
-
-  if (!SetHandleInformation(g_hChildStd_OUT_Rd, HANDLE_FLAG_INHERIT, 0))
-    ErrorExit(TEXT("Stdout SetHandleInformation"));
-
-  if (!CreatePipe(&g_hChildStd_IN_Rd, &g_hChildStd_IN_Wr, &saAttr, 0))
-    ErrorExit(TEXT("Stdin CreatePipe"));
-
-  if (!SetHandleInformation(g_hChildStd_IN_Wr, HANDLE_FLAG_INHERIT, 0))
-    ErrorExit(TEXT("Stdin SetHandleInformation"));
-}
-
-void CreateChildProcess(void) {
-  TCHAR szCmdline[] = TEXT("C:\\Windows\\System32\\cmd.exe");
-  PROCESS_INFORMATION piProcInfo;
-  STARTUPINFO siStartInfo;
-  BOOL bSuccess = FALSE;
-
-  ZeroMemory(&piProcInfo, sizeof(PROCESS_INFORMATION));
-
-  ZeroMemory(&siStartInfo, sizeof(STARTUPINFO));
-  siStartInfo.cb = sizeof(STARTUPINFO);
-  siStartInfo.hStdError = g_hChildStd_OUT_Wr;
-  siStartInfo.hStdOutput = g_hChildStd_OUT_Wr;
-  siStartInfo.hStdInput = g_hChildStd_IN_Rd;
-  siStartInfo.dwFlags |= STARTF_USESTDHANDLES;
-
-  bSuccess = CreateProcess(NULL, szCmdline, NULL, NULL, TRUE, 0, NULL, NULL,
-                           &siStartInfo, &piProcInfo);
-
-  if (!bSuccess)
-    ErrorExit(TEXT("CreateProcess"));
-  else {
-    CloseHandle(piProcInfo.hProcess);
-    CloseHandle(piProcInfo.hThread);
-
-    CloseHandle(g_hChildStd_OUT_Wr);
-    CloseHandle(g_hChildStd_IN_Rd);
-  }
-}
-
-DWORD WINAPI WriteToPipe(LPDWORD dummy) {
-  UNREFERENCED_PARAMETER(dummy);
-
-  DWORD dwWritten, iResult;
-  CHAR chBuf[BUFSIZE] = "";
-
-  for (;;) {
-    BOOL bSuccess = FALSE;
-    for (DWORD i = 0; i < BUFSIZE; ++i)
-      chBuf[i] = 0;
-    while (!(iResult = recv(ClientSocket, chBuf, BUFSIZE, 0)))
-      ;
-    if (iResult < 0) {
-      printf("recv failed with error: %d\n", WSAGetLastError());
-      exit(-1);
+    // Initialize Winsock
+    result = WSAStartup(MAKEWORD(2, 2), &wsData);
+    if (result != 0) {
+        printf("Failed to initialize Winsock: %d\n", result);
+        exitWithError(TEXT("WSAStartup failed"));
     }
 
-    bSuccess =
-        WriteFile(g_hChildStd_IN_Wr, chBuf, strlen(chBuf), &dwWritten, NULL);
-    if (!bSuccess || !dwWritten) {
-      return EOK;
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE;
+
+    // Resolve server address and port
+    result = getaddrinfo(NULL, DEFAULT_PORT, &hints, &resolvedAddr);
+    if (result != 0) {
+        printf("Address resolution failed: %d\n", result);
+        WSACleanup();
+        exitWithError(TEXT("getaddrinfo failed"));
     }
-  }
-  return EOK;
+
+    // Create a listening socket
+    listeningSocket = socket(resolvedAddr->ai_family, resolvedAddr->ai_socktype, resolvedAddr->ai_protocol);
+    if (listeningSocket == INVALID_SOCKET) {
+        printf("Socket creation failed: %ld\n", WSAGetLastError());
+        freeaddrinfo(resolvedAddr);
+        WSACleanup();
+        exitWithError(TEXT("Socket creation failed"));
+    }
+
+    // Bind the socket
+    result = bind(listeningSocket, resolvedAddr->ai_addr, (int)resolvedAddr->ai_addrlen);
+    if (result == SOCKET_ERROR) {
+        printf("Binding failed: %d\n", WSAGetLastError());
+        freeaddrinfo(resolvedAddr);
+        closesocket(listeningSocket);
+        WSACleanup();
+        exitWithError(TEXT("Binding failed"));
+    }
+
+    freeaddrinfo(resolvedAddr);
+
+    // Start listening
+    result = listen(listeningSocket, SOMAXCONN);
+    if (result == SOCKET_ERROR) {
+        printf("Listening failed: %d\n", WSAGetLastError());
+        closesocket(listeningSocket);
+        WSACleanup();
+        exitWithError(TEXT("Listening failed"));
+    }
+
+    // Accept a client connection
+    clientSock = accept(listeningSocket, NULL, NULL);
+    if (clientSock == INVALID_SOCKET) {
+        printf("Connection acceptance failed: %d\n", WSAGetLastError());
+        closesocket(listeningSocket);
+        WSACleanup();
+        exitWithError(TEXT("Connection acceptance failed"));
+    }
+
+    closesocket(listeningSocket); // No longer need the listening socket
 }
 
-DWORD WINAPI ReadFromPipe(LPDWORD dummy) {
-  UNREFERENCED_PARAMETER(dummy);
+void spawnChildProcess(void) {
+    TCHAR commandLine[] = TEXT("C:\\Windows\\System32\\cmd.exe");
+    PROCESS_INFORMATION procInfo;
+    STARTUPINFO startupInfo;
+    BOOL success = FALSE;
 
-  DWORD dwRead, dwWritten, iSendResult;
-  CHAR chBuf[BUFSIZE + 1];
+    ZeroMemory(&procInfo, sizeof(PROCESS_INFORMATION));
+    ZeroMemory(&startupInfo, sizeof(STARTUPINFO));
+    startupInfo.cb = sizeof(STARTUPINFO);
+    startupInfo.hStdError = outputPipeWrite;
+    startupInfo.hStdOutput = outputPipeWrite;
+    startupInfo.hStdInput = inputPipeRead;
+    startupInfo.dwFlags |= STARTF_USESTDHANDLES;
 
-  for (;;) {
-    BOOL bSuccess = FALSE;
+    success = CreateProcess(NULL, commandLine, NULL, NULL, TRUE, 0, NULL, NULL, &startupInfo, &procInfo);
 
-    for (;;) {
-      bSuccess = ReadFile(g_hChildStd_OUT_Rd, chBuf, BUFSIZE, &dwRead, NULL);
-      if (!bSuccess) {
-        return EOK;
-      }
+    if (!success)
+        exitWithError(TEXT("Process creation failed"));
+    else {
+        CloseHandle(procInfo.hProcess);
+        CloseHandle(procInfo.hThread);
 
-      chBuf[dwRead] = 0;
-
-      iSendResult = send(ClientSocket, chBuf, dwRead, 0);
-      if (iSendResult == SOCKET_ERROR) {
-        exit(-1);
-      }
+        CloseHandle(outputPipeWrite);
+        CloseHandle(inputPipeRead);
     }
-  }
-  return EOK;
 }
 
-void ErrorExit(PTSTR lpszFunction) {
-  LPVOID lpMsgBuf;
-  LPVOID lpDisplayBuf;
-  DWORD dw = GetLastError();
+void setupPipes(void) {
+    SECURITY_ATTRIBUTES secAttr;
 
-  FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+    secAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    secAttr.bInheritHandle = TRUE;
+    secAttr.lpSecurityDescriptor = NULL;
+
+    if (!CreatePipe(&outputPipeRead, &outputPipeWrite, &secAttr, 0))
+        exitWithError(TEXT("Output pipe creation failed"));
+
+    if (!SetHandleInformation(outputPipeRead, HANDLE_FLAG_INHERIT, 0))
+        exitWithError(TEXT("Output pipe handle setting failed"));
+
+    if (!CreatePipe(&inputPipeRead, &inputPipeWrite, &secAttr, 0))
+        exitWithError(TEXT("Input pipe creation failed"));
+
+    if (!SetHandleInformation(inputPipeWrite, HANDLE_FLAG_INHERIT, 0))
+        exitWithError(TEXT("Input pipe handle setting failed"));
+}
+
+void processClientConnection(void) {
+    setupPipes();
+    configureSocket();
+    spawnChildProcess();
+
+    HANDLE workerThreads[2];
+    workerThreads[0] = CreateThread(NULL, 0, handleWritePipe, NULL, 0, NULL);
+    workerThreads[1] = CreateThread(NULL, 0, handleReadPipe, NULL, 0, NULL);
+
+    WaitForMultipleObjects(2, workerThreads, TRUE, INFINITE);
+
+    for (int i = 0; i < 2; ++i)
+        CloseHandle(workerThreads[i]);
+
+    closeClientSocket();
+}
+
+DWORD WINAPI handleWritePipe(LPDWORD param) {
+    UNREFERENCED_PARAMETER(param);
+
+    DWORD bytesWritten, result;
+    CHAR buffer[BUFSIZE] = "";
+
+    while (TRUE) {
+        BOOL success = FALSE;
+        memset(buffer, 0, sizeof(buffer));
+        while (!(result = recv(clientSock, buffer, BUFSIZE, 0))) ;
+        if (result < 0) {
+            printf("Receiving data failed: %d\n", WSAGetLastError());
+            exit(-1);
+        }
+
+        success = WriteFile(inputPipeWrite, buffer, strlen(buffer), &bytesWritten, NULL);
+        if (!success || !bytesWritten) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+DWORD WINAPI handleReadPipe(LPDWORD param) {
+    UNREFERENCED_PARAMETER(param);
+
+    DWORD bytesRead, bytesWritten, sendResult;
+    CHAR buffer[BUFSIZE + 1];
+
+    while (TRUE) {
+        BOOL success = FALSE;
+
+        success = ReadFile(outputPipeRead, buffer, BUFSIZE, &bytesRead, NULL);
+        if (!success) {
+            return 0;
+        }
+
+        buffer[bytesRead] = 0;
+
+        sendResult = send(clientSock, buffer, bytesRead, 0);
+        if (sendResult == SOCKET_ERROR) {
+            exit(-1);
+        }
+    }
+    return 0;
+}
+
+void closeClientSocket(void) {
+    DWORD result = shutdown(clientSock, SD_SEND);
+    if (result == SOCKET_ERROR) {
+        printf("Shutdown failed: %d\n", WSAGetLastError());
+        closesocket(clientSock);
+        WSACleanup();
+        exitWithError(TEXT("Shutdown failed"));
+    }
+    closesocket(clientSock);
+    WSACleanup();
+}
+
+void exitWithError(PTSTR functionName) {
+    LPVOID msgBuffer;
+    LPVOID displayBuffer;
+    DWORD errorCode = GetLastError();
+
+    FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
                     FORMAT_MESSAGE_IGNORE_INSERTS,
-                NULL, dw, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                (LPTSTR)&lpMsgBuf, 0, NULL);
+                  NULL, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                  (LPTSTR)&msgBuffer, 0, NULL);
 
-  lpDisplayBuf =
-      (LPVOID)LocalAlloc(LMEM_ZEROINIT, (lstrlen((LPCTSTR)lpMsgBuf) +
-                                         lstrlen((LPCTSTR)lpszFunction) + 40) *
-                                            sizeof(TCHAR));
-  StringCchPrintf((LPTSTR)lpDisplayBuf, LocalSize(lpDisplayBuf) / sizeof(TCHAR),
-                  TEXT("%s failed with error %d: %s"), lpszFunction, dw,
-                  lpMsgBuf);
-  MessageBox(NULL, (LPCTSTR)lpDisplayBuf, TEXT("Error"), MB_OK);
+    displayBuffer = (LPVOID)LocalAlloc(LMEM_ZEROINIT, 
+                                        (lstrlen((LPCTSTR)msgBuffer) + lstrlen((LPCTSTR)functionName) + 40) *
+                                        sizeof(TCHAR));
+    StringCchPrintf((LPTSTR)displayBuffer, LocalSize(displayBuffer) / sizeof(TCHAR),
+                    TEXT("%s failed with error %d: %s"), functionName, errorCode, msgBuffer);
+    MessageBox(NULL, (LPCTSTR)displayBuffer, TEXT("Error"), MB_OK);
 
-  LocalFree(lpMsgBuf);
-  LocalFree(lpDisplayBuf);
-  ExitProcess(1);
+    LocalFree(msgBuffer);
+    LocalFree(displayBuffer);
+    ExitProcess(1);
 }
